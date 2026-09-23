@@ -9,8 +9,38 @@ try:
 except ImportError:
     _HAS_SDK = False
 
-MODEL = "llama-3.3-70b-versatile"
+MODEL = "openai/gpt-oss-120b"
 MAX_TOKENS = 1024  # Increased from 512 to prevent response truncation
+
+# ── Deployment context ──────────────────────────────────────────────────────
+# Injected into every prompt so the model reasons from your ACTUAL
+# infrastructure instead of guessing generic SRE causes (e.g. "CPU limits",
+# "DB query plan regression") that may not apply to your stack at all.
+# Edit this to match your real deployment.
+DEPLOYMENT_CONTEXT = os.environ.get(
+    "DEPLOYMENT_CONTEXT",
+    "Hosted on Vercel serverless functions with a 10-second execution "
+    "timeout per request — a request that takes longer than 10s is killed "
+    "by the platform and returns 503. This is a TIMEOUT, not a CPU or "
+    "memory limit. Database is Supabase Postgres, accessed via the pg8000 "
+    "driver through the IPv4 connection pooler (port 6543) — if this URL "
+    "is misconfigured (e.g. pointing at the old IPv6/5432 endpoint), "
+    "connections hang until the platform times out the whole request. "
+    "LLM calls go to Groq's API. Air quality data comes from OpenWeatherMap.",
+)
+
+# Per-endpoint description of what each route actually does, so the model
+# doesn't assume generic backend behavior (e.g. a DB call) that isn't there.
+# Extend this dict as you add routes.
+ENDPOINT_CONTEXT = {
+    "/api/aqi": "Calls OpenWeatherMap's geocoding + air-pollution APIs only. No database access, no LLM call.",
+    "/api/chat": "Calls OpenWeatherMap for AQI data, then calls the Groq LLM API, then writes one row to the ChatHistory table (Postgres via Supabase pooler) if a username was given. A hang in any of these three steps — OpenWeatherMap, Groq, or the DB pooler — can cause the 10s serverless timeout.",
+    "/api/auth/register": "Writes one row to the User table (Postgres via Supabase pooler). No external API calls.",
+    "/api/auth/login": "Reads one row from the User table (Postgres via Supabase pooler). No external API calls.",
+    "/api/auth/salt": "Reads one row from the User table (Postgres via Supabase pooler). No external API calls.",
+    "/api/history": "Reads or writes ChatHistory rows (Postgres via Supabase pooler). No external API calls.",
+    "/api/validate-keys": "Calls OpenWeatherMap and Groq once each to test provided keys. No database access.",
+}
 
 # ── Singleton Groq client (created once, reused per request) ──────────────
 _client: "groq.Groq | None" = None
@@ -148,8 +178,29 @@ def _pick_mock(anomaly: dict) -> dict:
 # ── Claude integration ─────────────────────────────────────────────────────────
 
 def _build_prompt(anomaly: dict) -> str:
+    endpoint = anomaly.get("endpoint", "")
+    endpoint_note = ENDPOINT_CONTEXT.get(endpoint)
+
+    context = f"Deployment context: {DEPLOYMENT_CONTEXT}"
+    if endpoint_note:
+        context += f"\n\nWhat this specific endpoint does: {endpoint_note}"
+    else:
+        context += (
+            "\n\nNo specific description is available for this endpoint's "
+            "internals — do not guess what subsystems (database, cache, "
+            "external APIs) it touches."
+        )
+
     return (
         "You are an expert SRE analysing an API anomaly. "
+        "Ground root_cause and steps ONLY in the deployment context and "
+        "endpoint description below. Do NOT invent a specific cause (database "
+        "query plans, CPU/memory limits, cache issues, etc.) unless the context "
+        "explicitly supports it — if the endpoint description says there's no "
+        "database call, do not suggest database fixes. If the real cause isn't "
+        "determinable from what's given, say so generically and lower the "
+        "confidence score rather than naming an unsupported specific cause.\n\n"
+        f"{context}\n\n"
         "Return ONLY a valid JSON object (no markdown fences) with these exact keys:\n"
         "  endpoint (string), anomaly_type (string), issue (string), "
         "severity (string: low/medium/high/critical), confidence (float 0-1), "
