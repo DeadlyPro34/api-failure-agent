@@ -4,26 +4,26 @@ import re
 import random
 
 try:
-    import anthropic  # type: ignore
+    import groq  # type: ignore
     _HAS_SDK = True
 except ImportError:
     _HAS_SDK = False
 
-MODEL = "claude-sonnet-4-6"
+MODEL = "llama-3.3-70b-versatile"
 MAX_TOKENS = 1024  # Increased from 512 to prevent response truncation
 
-# ── Singleton Anthropic client (created once, reused per request) ──────────────
-_client: "anthropic.Anthropic | None" = None
+# ── Singleton Groq client (created once, reused per request) ──────────────
+_client: "groq.Groq | None" = None
 
 
-def _get_client() -> "anthropic.Anthropic":
-    """Return the module-level singleton Anthropic client, creating it once."""
+def _get_client() -> "groq.Groq":
+    """Return the module-level singleton Groq client, creating it once."""
     global _client
     if _client is None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        api_key = os.environ.get("GROQ_API_KEY", "").strip()
         if not api_key:
-            raise EnvironmentError("ANTHROPIC_API_KEY is not set or is empty.")
-        _client = anthropic.Anthropic(api_key=api_key)
+            raise EnvironmentError("GROQ_API_KEY is not set or is empty.")
+        _client = groq.Groq(api_key=api_key)
     return _client
 
 
@@ -153,7 +153,7 @@ def _build_prompt(anomaly: dict) -> str:
         "Return ONLY a valid JSON object (no markdown fences) with these exact keys:\n"
         "  endpoint (string), anomaly_type (string), issue (string), "
         "severity (string: low/medium/high/critical), confidence (float 0-1), "
-        "root_cause (string), steps (array of strings), source (must be \"claude\").\n\n"
+        "root_cause (string), steps (array of strings), source (must be \"groq\").\n\n"
         f"Anomaly data:\n{json.dumps(anomaly, indent=2)}"
     )
 
@@ -175,26 +175,26 @@ def generate_alert(anomaly: dict) -> dict:
                          confidence, root_cause, steps, source.
     No `timestamp` field is included.
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
 
     if api_key and _HAS_SDK:
         try:
             client = _get_client()
-            message = client.messages.create(
+            completion = client.chat.completions.create(
                 model=MODEL,
                 max_tokens=MAX_TOKENS,
                 messages=[{"role": "user", "content": _build_prompt(anomaly)}],
             )
-            text = message.content[0].text.strip()
+            text = completion.choices[0].message.content.strip()
             # Log raw output before parsing so failures are visible (#12)
-            print(f"[llm] Claude raw response: {text[:300]}")
+            print(f"[llm] Groq raw response: {text[:300]}")
             text = _strip_markdown_fences(text)
             result = json.loads(text)
             # Ensure required fields and correct source tag
-            result["source"] = "claude"
+            result["source"] = "groq"
             result.setdefault("endpoint", anomaly.get("endpoint", ""))
             result.setdefault("anomaly_type", anomaly.get("anomaly_type", ""))
-            # Remove any timestamp if Claude sneaked one in
+            # Remove any timestamp if Groq sneaked one in
             result.pop("timestamp", None)
             return result
 
@@ -202,21 +202,21 @@ def generate_alert(anomaly: dict) -> dict:
             # Missing API key — log clearly, do not mask
             print(f"[llm] Configuration error: {exc} — using mock fallback")
 
-        except anthropic.AuthenticationError as exc:  # type: ignore[attr-defined]
+        except groq.AuthenticationError as exc:  # type: ignore[attr-defined]
             print(f"[llm] Authentication error (invalid API key): {exc} — using mock fallback")
 
-        except anthropic.RateLimitError as exc:  # type: ignore[attr-defined]
+        except groq.RateLimitError as exc:  # type: ignore[attr-defined]
             print(f"[llm] Rate limit exceeded: {exc} — using mock fallback")
 
-        except anthropic.APIConnectionError as exc:  # type: ignore[attr-defined]
-            print(f"[llm] Network/connection error reaching Anthropic API: {exc} — using mock fallback")
+        except groq.APIConnectionError as exc:  # type: ignore[attr-defined]
+            print(f"[llm] Network/connection error reaching Groq API: {exc} — using mock fallback")
 
         except json.JSONDecodeError as exc:
-            print(f"[llm] Failed to parse Claude JSON response: {exc} — using mock fallback")
+            print(f"[llm] Failed to parse Groq JSON response: {exc} — using mock fallback")
 
         except Exception as exc:
             # Catch-all for unexpected errors — still logged, not silently masked
-            print(f"[llm] Unexpected error during Claude call: {type(exc).__name__}: {exc} — using mock fallback")
+            print(f"[llm] Unexpected error during Groq call: {type(exc).__name__}: {exc} — using mock fallback")
 
     # Rich mock fallback
     mock = _pick_mock(anomaly)
